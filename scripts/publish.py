@@ -85,6 +85,9 @@ def publish(folder):
     wait_ready(parent, "캐러셀")
     if dry:
         print("시험 실행: 캐러셀 컨테이너까지 정상 생성됨. 게시는 하지 않음 (컨테이너는 24시간 후 자동 만료)")
+        if meta.get("dry_run"):  # 시험용 폴더는 표시를 남겨 다음 실행에서 다시 처리하지 않는다
+            (folder / "dry_run_ok.json").write_text(json.dumps({"tested_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                                                "commit": sha}) + "\n", encoding="utf-8")
         return None
     limit = call("GET", f"{uid}/content_publishing_limit", fields="quota_usage,config")
     print(f"- 최근 24시간 게시 사용량: {limit.get('data', [{}])[0].get('quota_usage')}")
@@ -102,7 +105,14 @@ def publish(folder):
 
 
 def pending():
-    return sorted(p.parent for p in POSTS.glob("*/post.json") if not (p.parent / "published.json").exists())
+    """게시할 폴더: published.json 이 없고, 시험용(dry_run)이면 아직 시험하지 않은 폴더."""
+    out = []
+    for p in POSTS.glob("*/post.json"):
+        f = p.parent
+        if (f / "published.json").exists() or (f / "dry_run_ok.json").exists():
+            continue
+        out.append(f)
+    return sorted(out)
 
 
 if __name__ == "__main__":

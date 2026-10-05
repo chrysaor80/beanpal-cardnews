@@ -16,7 +16,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--type", required=True, choices=["brief", "deepdive"])
+ap.add_argument("--type", required=True, choices=["brief", "deepdive", "test"])
 ap.add_argument("--date", required=True)
 ap.add_argument("--src", required=True)
 ap.add_argument("--caption", required=True)
