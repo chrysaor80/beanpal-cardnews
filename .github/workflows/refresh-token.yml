@@ -1,0 +1,32 @@
+name: 토큰 갱신
+
+# 인스타 장기 토큰은 60일 동안 유효하다. 매달 1일·15일에 갱신해 만료를 막는다.
+# 새 토큰을 Secrets 에 다시 저장하려면 SECRETS_PAT(저장소 Secrets 쓰기 권한이 있는 개인 토큰)가 필요하다.
+# 이 작업이 실패하면 GitHub 가 실패 알림 메일을 보내므로, 그때 토큰을 수동으로 다시 발급하면 된다.
+on:
+  schedule:
+    - cron: "17 0 1,15 * *"   # 매달 1일·15일 09:17 (서울)
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 장기 토큰 갱신
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.SECRETS_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::SECRETS_PAT 가 없어 갱신한 토큰을 저장할 수 없음. README 의 토큰 갱신 설정을 확인하세요."
+            exit 1
+          fi
+          resp=$(curl -sS --fail-with-body -G "https://graph.instagram.com/refresh_access_token" \
+            --data-urlencode "grant_type=ig_refresh_token" \
+            --data-urlencode "access_token=${IG_ACCESS_TOKEN}")
+          new=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          echo "::add-mask::$new"
+          days=$(echo "$resp" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('expires_in',0))//86400)")
+          gh secret set IG_ACCESS_TOKEN --repo "${GITHUB_REPOSITORY}" --body "$new"
+          echo "토큰 갱신 완료 · 남은 유효기간 약 ${days}일"

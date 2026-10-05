@@ -1,0 +1,15 @@
+name: 토큰 확인
+
+# 설정이 끝났는지 확인할 때 Actions 탭에서 직접 실행한다. 게시는 하지 않는다.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 토큰·계정·게시 한도 확인
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: python3 scripts/publish.py --check
