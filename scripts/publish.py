@@ -9,7 +9,7 @@
 
 post.json 형식:
   {"type": "brief" | "deepdive", "date": "YYYY-MM-DD", "slides": ["01.jpg", ...], "dry_run": false}
-caption.txt: 인스타 캡션 전문 (2,200자 이하, 해시태그 30개 이하)
+caption.txt: 인스타 캡션 전문 (2,200자 이하, 해시태그 5개 이하)
 """
 import json, os, sys, time, urllib.parse, urllib.request, urllib.error
 from pathlib import Path
@@ -60,8 +60,9 @@ def validate(folder, meta, caption):
             raise SystemExit(f"[중단] {folder.name}: {s} 는 JPEG 가 아님 (인스타 API는 JPEG만 받음)")
     if len(caption) > 2200:
         raise SystemExit(f"[중단] {folder.name}: 캡션 {len(caption)}자 (2,200자 초과)")
-    if caption.count("#") > 30:
-        raise SystemExit(f"[중단] {folder.name}: 해시태그 30개 초과")
+    tags = [w for w in caption.split() if w.startswith("#")]
+    if len(tags) > 5:
+        raise SystemExit(f"[중단] {folder.name}: 해시태그 {len(tags)}개 (인스타는 게시물당 5개까지)")
     return slides
 
 
