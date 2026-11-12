@@ -1,0 +1,52 @@
+name: 인스타 예약 게시
+
+# "인스타 게시" 작업에서 승인된(approved.json) 폴더 중 publish_at 이 지난 것을 게시한다.
+# 승인 기록은 GitHub API 로 다시 검증한다(승인된 '인스타 게시' 실행인지, 승인 뒤 폴더 내용이 그대로인지).
+# 예약 시각을 바꾸면 아래 cron 도 함께 맞춘다. GitHub 예약 실행은 수 분~십여 분 늦어질 수 있어
+# 예약 시각마다 30분 뒤 한 번 더 돈다(이미 게시했으면 아무것도 하지 않는다).
+on:
+  schedule:
+    - cron: "40 8,11 * * 4"   # 목요일 17:40 · 20:40 (서울)
+    - cron: "10 9,12 * * 4"   # 목요일 18:10 · 21:10 (서울) 재시도
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "시험 실행 (캐러셀 컨테이너까지만 만들고 게시하지 않음)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: instagram-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # 승인 시점 커밋과 내용 비교에 필요
+
+      - name: 예약 게시
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '' }}
+        run: python3 scripts/publish.py --scheduled
+
+      - name: 게시 기록 저장
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A posts
+          if git diff --cached --quiet; then
+            echo "새 게시 기록 없음"
+          else
+            git commit -m "게시 기록 [skip ci]"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi

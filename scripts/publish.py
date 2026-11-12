@@ -4,19 +4,32 @@
 - 표준 라이브러리만 사용한다(설치 불필요).
 - 게시 대상: post.json 이 있고 published.json 이 없는 폴더. 같은 폴더를 두 번 게시하지 않는다.
 - 이미지 주소: 이 저장소의 특정 커밋에 고정된 raw.githubusercontent.com 주소(공개 저장소 필요).
-- 환경변수: IG_ACCESS_TOKEN(필수), GITHUB_REPOSITORY, GITHUB_SHA(Actions 가 자동 제공),
+- 환경변수: IG_ACCESS_TOKEN(필수), GITHUB_REPOSITORY, GITHUB_SHA, GITHUB_RUN_ID(Actions 가 자동 제공),
   DRY_RUN=1 이면 컨테이너 생성까지만 하고 게시하지 않는다(설정 확인용).
+  예약 게시(--scheduled)는 승인 검증에 GITHUB_TOKEN 도 쓴다.
+
+실행 방식:
+- (인자 없음) "인스타 게시" 작업이 승인된 뒤 실행. publish_at 이 없거나 이미 지났으면 바로 게시하고,
+  아직 오지 않았으면 게시하지 않고 approved.json(승인 기록)만 남긴다.
+- --scheduled: "인스타 예약 게시" 작업이 정해진 시각에 실행. 승인 기록이 있고 publish_at 이 지난 폴더만,
+  승인 기록을 GitHub API 로 검증한 뒤 게시한다(승인된 실행인지, 승인 뒤 폴더 내용이 바뀌지 않았는지).
+- --check: 토큰·계정 확인만.
 
 post.json 형식:
-  {"type": "brief" | "deepdive", "date": "YYYY-MM-DD", "slides": ["01.jpg", ...], "dry_run": false}
+  {"type": "brief" | "deepdive", "date": "YYYY-MM-DD", "slides": ["01.jpg", ...], "dry_run": false,
+   "publish_at": "2026-11-19T17:40+09:00"}   ← publish_at 은 선택
 caption.txt: 인스타 캡션 전문 (2,200자 이하, 해시태그 5개 이하)
 """
-import json, os, sys, time, urllib.parse, urllib.request, urllib.error
+import json, os, subprocess, sys, time, urllib.parse, urllib.request, urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 API = "https://graph.instagram.com/v25.0"
 ROOT = Path(__file__).resolve().parent.parent
 POSTS = ROOT / "posts"
+RECORDS = {"approved.json", "published.json", "dry_run_ok.json"}  # 게시 후·승인 후 생기는 기록 파일
+APPROVAL_ENV = "instagram"
+MAX_LATE_HOURS = 4  # 예약 시각에서 이보다 늦으면 게시하지 않고 실패로 알린다(지난 소식이 뒤늦게 올라가는 것 방지)
 
 
 def call(method, path, **params):
@@ -105,6 +118,66 @@ def publish(folder):
     return rec
 
 
+def publish_time(meta):
+    """post.json 의 publish_at(시간대 포함 ISO 시각)을 datetime 으로. 없으면 None."""
+    at = meta.get("publish_at")
+    if not at:
+        return None
+    t = datetime.fromisoformat(at)
+    if t.tzinfo is None:
+        raise SystemExit(f"[중단] publish_at 에 시간대가 없음: {at}")
+    return t
+
+
+def record_approval(folder, at):
+    """승인된 실행에서 예약 시각 전이면 게시하지 않고 승인 기록만 남긴다."""
+    rec = {"approved_run_id": int(os.environ["GITHUB_RUN_ID"]), "commit": os.environ["GITHUB_SHA"],
+           "approved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "publish_at": at.isoformat()}
+    (folder / "approved.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"승인 기록: {folder.name} → {at.isoformat()} 에 예약 게시")
+
+
+def gh_api(path):
+    url = f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}/repos/{os.environ['GITHUB_REPOSITORY']}/{path}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                                               "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"[GitHub API 오류] {path} → HTTP {e.code}: {e.read().decode(errors='replace')}")
+
+
+def tree(rev, folder):
+    """rev 시점 폴더의 {파일명: blob 해시} (기록 파일 제외)."""
+    out = subprocess.run(["git", "ls-tree", rev, "--", f"posts/{folder.name}/"], cwd=ROOT,
+                         capture_output=True, text=True, check=True).stdout
+    files = {}
+    for line in out.splitlines():
+        info, path = line.split("\t", 1)
+        name = path.rsplit("/", 1)[-1]
+        if name not in RECORDS:
+            files[name] = info.split()[2]
+    return files
+
+
+def verify_approval(folder):
+    """approved.json 이 실제로 승인된 "인스타 게시" 실행에서 나왔고, 그 뒤 내용이 바뀌지 않았는지 확인한다."""
+    rec = json.loads((folder / "approved.json").read_text(encoding="utf-8"))
+    run_id, commit = rec["approved_run_id"], rec["commit"]
+    run = gh_api(f"actions/runs/{run_id}")
+    if not run.get("path", "").startswith(".github/workflows/publish.yml") or run.get("head_sha") != commit:
+        raise SystemExit(f"[중단] {folder.name}: 승인 기록의 실행({run_id})이 '인스타 게시' 작업·커밋과 맞지 않음")
+    approvals = gh_api(f"actions/runs/{run_id}/approvals")
+    if not any(a.get("state") == "approved" and any(e.get("name") == APPROVAL_ENV for e in a.get("environments", []))
+               for a in approvals):
+        raise SystemExit(f"[중단] {folder.name}: 실행 {run_id} 에 '{APPROVAL_ENV}' 승인 내역이 없음")
+    approved, now = tree(commit, folder), tree("HEAD", folder)
+    if not approved or approved != now:
+        raise SystemExit(f"[중단] {folder.name}: 승인 뒤 폴더 내용이 바뀜. 다시 승인받아야 함")
+    print(f"- 승인 확인: 실행 {run_id} · 커밋 {commit[:7]} · 내용 일치")
+
+
 def pending():
     """게시할 폴더: published.json 이 없고, 시험용(dry_run)이면 아직 시험하지 않은 폴더."""
     out = []
@@ -116,14 +189,41 @@ def pending():
     return sorted(out)
 
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--check":
+def main(argv):
+    if argv[:1] == ["--check"]:
         me = call("GET", "me", fields="user_id,username,account_type")
         lim = call("GET", f"{me['user_id']}/content_publishing_limit", fields="quota_usage,config")
         print(f"토큰 정상 · @{me.get('username')} · 계정 유형 {me.get('account_type')} · 게시 사용량 {lim}")
-        sys.exit(0)
+        return
+    scheduled = argv[:1] == ["--scheduled"]
+    now = datetime.now(timezone.utc)
     todo = pending()
     if not todo:
-        print("게시할 새 폴더 없음"); sys.exit(0)
+        print("게시할 새 폴더 없음"); return
     for f in todo:
-        publish(f)
+        at = publish_time(json.loads((f / "post.json").read_text(encoding="utf-8")))
+        approved = (f / "approved.json").exists()
+        if scheduled:
+            if at is None:
+                continue  # 예약 없는 폴더는 "인스타 게시" 작업이 승인 즉시 게시한다
+            if not approved:
+                print(f"- {f.name}: 승인 대기 중 (예약 {at.isoformat()})"); continue
+            if at > now:
+                print(f"- {f.name}: 예약 시각 전 ({at.isoformat()})"); continue
+            late = (now - at).total_seconds() / 3600
+            if late > MAX_LATE_HOURS:
+                raise SystemExit(f"[중단] {f.name}: 예약 시각보다 {late:.1f}시간 늦음. 게시할지 직접 확인 필요 "
+                                 f"(게시하려면 publish_at 을 고쳐 다시 승인받거나 '인스타 게시'를 수동 실행)")
+            verify_approval(f)
+            publish(f)
+        elif at and at > now:
+            if approved:
+                print(f"- {f.name}: 이미 승인됨, {at.isoformat()} 에 예약 게시")
+            else:
+                record_approval(f, at)
+        else:
+            publish(f)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

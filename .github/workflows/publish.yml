@@ -2,6 +2,8 @@ name: 인스타 게시
 
 # posts/<폴더>/post.json 이 올라오면 실행된다.
 # environment "instagram" 에 승인자를 지정해 두면, 승인 버튼을 누르기 전에는 게시하지 않는다.
+# post.json 에 publish_at(예약 시각)이 있고 아직 그 시각 전이면, 승인 시 게시하지 않고 승인 기록(approved.json)만
+# 남긴다. 실제 게시는 "인스타 예약 게시"(publish-scheduled.yml)가 그 시각에 한다.
 on:
   push:
     branches: [main]
@@ -41,7 +43,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "새 게시 기록 없음"
           else
-            git commit -m "게시 기록 [skip ci]"
+            git commit -m "게시·승인 기록 [skip ci]"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
